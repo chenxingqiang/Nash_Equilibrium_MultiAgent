@@ -1,0 +1,111 @@
+function main_simulation()
+    % 初始化参数
+    [A, B, G, E, Q, R, initial_states] = initialize_params();
+    
+    % 仿真参数
+    T = 100000; % 增加时间步数
+    num_agents = size(initial_states, 2);
+    
+    % 初始化存储结果的数组
+    states = zeros(size(initial_states, 1), num_agents, T);
+    errors = zeros(size(initial_states, 1), num_agents, T);
+    controls = zeros(1, num_agents, T);
+    W_ic_history = cell(num_agents, T);
+    W_ia_history = cell(num_agents, T);
+    
+   % 初始化Actor-Critic网络权重
+    W_ic = cell(1, num_agents);
+    W_ia = cell(1, num_agents);
+    for i = 1:num_agents
+        state_dim = size(initial_states, 1);
+        W_ic{i} = 0.01 * randn(state_dim + 1, state_dim + 1); % 修改维度
+        W_ia{i} = 0.01 * randn(state_dim, 1); % 修改维度
+    end
+
+    
+    % 初始化状态
+    states(:,:,1) = initial_states;
+    
+    % 学习率参数
+    initial_learning_rate = 0.0001; % 降低初始学习率
+    decay_rate = 0.9999;
+    
+    % 早停参数
+    patience = 2000; % 增加耐心值
+    min_delta = 1e-8; % 减小最小改进阈值
+    best_error = Inf;
+    wait = 0;
+    
+    % Adam优化器参数
+    beta1 = 0.9;
+    beta2 = 0.999;
+    epsilon = 1e-8;
+    m_ic = cell(1, num_agents);
+    v_ic = cell(1, num_agents);
+    m_ia = cell(1, num_agents);
+    v_ia = cell(1, num_agents);
+    for i = 1:num_agents
+        m_ic{i} = zeros(size(W_ic{i}));
+        v_ic{i} = zeros(size(W_ic{i}));
+        m_ia{i} = zeros(size(W_ia{i}));
+        v_ia{i} = zeros(size(W_ia{i}));
+    end
+    
+    % 主循环
+    for t = 1:T-1
+        % 计算跟踪误差
+        for i = 1:num_agents
+            errors(:,i,t) = tracking_error(states(:,:,t), i, E, G);
+        end
+        
+        % 衰减学习率
+        learning_rate = initial_learning_rate * (decay_rate ^ t);
+        
+        % 对每个智能体进行迭代
+        for i = 1:num_agents
+              % 值迭代
+            [Q_i, u_i] = value_iteration(errors(:,i,t), controls(1,i,t), Q, R, W_ic{i}, W_ia{i});
+            
+            % Actor-Critic更新
+            [Q_hat, u_hat, err_critic, err_actor] = actor_critic_network(errors(:,i,t), controls(1,i,t), ...
+                W_ic{i}, W_ia{i}, Q, R);
+            
+            % 梯度裁剪
+            max_grad_norm = 1.0;
+            grad_ic = clip_gradient(err_critic * W_ic{i}, max_grad_norm);
+            grad_ia = clip_gradient(err_actor * W_ia{i}, max_grad_norm);
+            
+            % Adam更新
+            [m_ic{i}, v_ic{i}, W_ic{i}] = adam_update(m_ic{i}, v_ic{i}, W_ic{i}, grad_ic, learning_rate, beta1, beta2, epsilon, t);
+            [m_ia{i}, v_ia{i}, W_ia{i}] = adam_update(m_ia{i}, v_ia{i}, W_ia{i}, grad_ia, learning_rate, beta1, beta2, epsilon, t);
+
+            
+            % 更新控制输入
+            controls(1,i,t) = u_hat;
+            
+            % 保存权重历史
+            W_ic_history{i, t} = W_ic{i}(:);
+            W_ia_history{i, t} = W_ia{i}(:);
+        end
+        
+        % 更新系统状态
+        for i = 1:num_agents
+            states(:,i,t+1) = system_dynamics(states(:,i,t), controls(1,i,t), A, B{i});
+        end
+        
+        % 早停检查
+        current_error = mean(abs(errors(:,:,t)), 'all');
+        if current_error < best_error - min_delta
+            best_error = current_error;
+            wait = 0;
+        else
+            wait = wait + 1;
+            if wait >= patience
+                fprintf('Early stopping at iteration %d\n', t);
+                break;
+            end
+        end
+    end
+    % 绘制结果
+    plot_all_results(states(:,:,1:t), errors(:,:,1:t), controls(:,:,1:t), W_ic_history(:,1:t), W_ia_history(:,1:t));
+end
